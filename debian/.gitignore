@@ -1,0 +1,6 @@
+/arsoft-logmx-installer/
+/*.substvars
+/files
+*.debhelper
+/arsoft-logmx/
+*.debhelper.log

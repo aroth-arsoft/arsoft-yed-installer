@@ -1,0 +1,368 @@
+#!/usr/bin/python
+# -*- coding: utf-8 -*-
+# kate: space-indent on; indent-width 4; mixedindent off; indent-mode python;
+
+import sys, os
+import argparse
+import urllib2
+import httplib
+import re
+import tempfile
+import shutil
+import platform
+from datetime import date
+from time import strptime, mktime
+from zipfile import ZipFile, BadZipfile
+from arsoft.inifile import IniFile
+
+def copytree(src, dst, symlinks=False, ignore=None):
+    """Recursively copy a directory tree using copy2().
+
+    The destination directory must not already exist.
+    If exception(s) occur, an Error is raised with a list of reasons.
+
+    If the optional symlinks flag is true, symbolic links in the
+    source tree result in symbolic links in the destination tree; if
+    it is false, the contents of the files pointed to by symbolic
+    links are copied.
+
+    The optional ignore argument is a callable. If given, it
+    is called with the `src` parameter, which is the directory
+    being visited by copytree(), and `names` which is the list of
+    `src` contents, as returned by os.listdir():
+
+        callable(src, names) -> ignored_names
+
+    Since copytree() is called recursively, the callable will be
+    called once for each directory that is copied. It returns a
+    list of names relative to the `src` directory that should
+    not be copied.
+
+    XXX Consider this example code rather than the ultimate tool.
+
+    """
+    names = os.listdir(src)
+    if ignore is not None:
+        ignored_names = ignore(src, names)
+    else:
+        ignored_names = set()
+
+    if not os.path.exists(dst):
+        os.makedirs(dst)
+    errors = []
+    for name in names:
+        if name in ignored_names:
+            continue
+        srcname = os.path.join(src, name)
+        dstname = os.path.join(dst, name)
+        try:
+            if symlinks and os.path.islink(srcname):
+                linkto = os.readlink(srcname)
+                os.symlink(linkto, dstname)
+            elif os.path.isdir(srcname):
+                copytree(srcname, dstname, symlinks, ignore)
+            else:
+                # Will raise a SpecialFileError for unsupported file types
+                shutil.copy2(srcname, dstname)
+        # catch the Error from the recursive copytree so that we can
+        # continue with other files
+        except Error as err:
+            errors.extend(err.args[0])
+        except EnvironmentError as why:
+            errors.append((srcname, dstname, str(why)))
+    try:
+        shutil.copystat(src, dst)
+    except OSError as why:
+        if WindowsError is not None and isinstance(why, WindowsError):
+            # Copying file access times may fail on Windows
+            pass
+        else:
+            errors.append((src, dst, str(why)))
+    if errors:
+        raise Error(errors)
+
+def mkdirp(directory):
+    if not os.path.isdir(directory):
+        os.makedirs(directory)
+
+class yed_installer(object):
+    
+    YED_SERVER = 'http://www.yworks.com'
+    DOWNLOAD_URL = YED_SERVER + '/en/products_yed_download.html'
+    DOWNLOAD_ZIP_URL = YED_SERVER + '/products/yed/demo/yEd-%(version)s.zip'
+
+
+    RE_LAST_VERSION = re.compile(
+            r'<p>[\s\n]*[\s\n]*The latest release of yEd Graph Editor is version\s+(?P<version>[0-9\.]+)\.[\s\n]*</p>'
+            )
+    CONFIG_DIRS = ['config', 'parsers', 'managers']
+
+    ICON_FILES = [ (16, 'yicon16.png', 'apps', 'yed'),
+                   (32, 'yicon32.png', 'apps', 'yed')
+                    ]
+
+    def __init__(self):
+        self._verbose = False
+        self._installer_dir = os.getcwd()
+
+    def _set_root_dir(self, root_dir=None):
+        self._rootdir = os.path.join(os.getcwd(), 'dist' if root_dir is None else root_dir)
+        self._statedir = os.path.join(self._rootdir, 'var/lib/arsoft-yed-installer')
+        self._appdir = os.path.join(self._rootdir, 'usr/lib/yed')
+        self._appbindir = os.path.join(self._rootdir, 'usr/bin')
+        self._icon_dir = os.path.join(self._rootdir, 'usr/share/icons/hicolor')
+
+    @staticmethod
+    def _parse_version_string(version_str):
+        ret = 0
+        elems = version_str.split('.')
+        base = 1
+        for e in elems.reserve():
+            num = int(e)
+            ret = ret + (num * base)
+            base = base * 100
+        return ret
+    @staticmethod
+    def _compare_version(lhs_version, lhs_release_date, rhs_version, rhs_release_date):
+        lhs_version_num = yed_installer._parse_version_string(lhs_version)
+        rhs_version_num = yed_installer._parse_version_string(rhs_version)
+        if lhs_version_num == rhs_version_num:
+            if lhs_release_date == rhs_release_date:
+                ret = 0
+            elif lhs_release_date > rhs_release_date:
+                ret = 1
+            else:
+                ret = -1
+        elif lhs_version_num > rhs_version_num:
+            ret = 1
+        else:
+            ret = -1
+        return ret
+
+    def _get_latest_version(self):
+        ret = False
+        version = None
+        try:
+            f = urllib2.urlopen(self.DOWNLOAD_URL)
+            content = f.read()
+            mo = self.RE_LAST_VERSION.search(content)
+            if mo:
+                #print('got line: ' + line)
+                version = mo.group('version')
+                ret = True
+        except urllib2.HTTPError as e:
+            print('HTTPError = ' + str(e.code))
+        except urllib2.URLError as e:
+            print('URLError = ' + str(e.reason))
+        except httplib.HTTPException as e:
+            print('HTTPException')
+        return (ret, version)
+
+    def _info(self):
+        (ret, version) = self._get_latest_version()
+        if ret:
+            print(('Latest version: ' + str(version)))
+        else:
+            print('Failed to retrieve information about latest version.')
+        return ret
+
+    def _update(self):
+        if not os.path.exists(self._statedir):
+            os.makedirs(self._statedir)
+
+        (ret, latest_version) = self._get_latest_version()
+        if ret:
+            version_download_url = self.DOWNLOAD_ZIP_URL % { 'version': latest_version }
+            print(('update to %s' % (latest_version)))
+            zip_filename = 'yed_%s.zip' % (latest_version)
+            zip_file = os.path.join(self._statedir, zip_filename)
+            if not os.path.exists(zip_file) or self._force:
+                try:
+                    zip_file_obj = open(zip_file, 'wb')
+                    print("download %s to %s" % (version_download_url, zip_file))
+                    ret = self._http_download_file(version_download_url, zip_file_obj)
+                    zip_file_obj.close()
+                except IOError as e:
+                    ret = False
+            else:
+                ret = True
+            if ret:
+                ret = self._unpack(zip_file, latest_version)
+                if not ret:
+                    print(('Failed to extract yEd from zip file %s' %(zip_file)))
+                    os.remove(zip_file)
+            else:
+                print(('Failed to download latest yEd zip file to %s' %(zip_file)))
+        else:
+            print('Failed to retrieve information about latest version.')
+            ret = False
+        return ret
+        
+    def _remove(self, purge=False):
+        ret = True
+        try:
+            if os.path.exists(self._statedir):
+                shutil.rmtree(self._statedir)
+        except OSError as e:
+            ret = False
+        try:
+            if os.path.exists(self._appdir):
+                shutil.rmtree(self._appdir)
+        except OSError as e:
+            ret = False
+        if purge:
+            try:
+                if os.path.exists(self._appconfdir):
+                    shutil.rmtree(self._appconfdir)
+            except OSError as e:
+                ret = False
+        return ret
+    
+    def _http_download_file(self, url, dest_file):
+        try:
+            f = urllib2.urlopen(url)
+            if f:
+                dest_file.write(f.read())
+            ret = True
+        except urllib2.HTTPError as e:
+            ret = False
+            print('HTTPError = ' + str(e.code))
+        except urllib2.URLError as e:
+            ret = False
+            print('URLError = ' + str(e.reason))
+        except httplib.HTTPException as e:
+            ret = False
+            print('HTTPException')
+        return ret
+    
+    def _http_file_info(self, url):
+        request = urllib2.Request(url)
+        request.get_method = lambda : 'HEAD'
+        try:
+            response = urllib2.urlopen(request)
+            ret = response.info()
+        except urllib2.HTTPError as e:
+            ret = None
+            print('HTTPError = ' + str(e.code))
+        except urllib2.URLError as e:
+            ret = None
+            print('URLError = ' + str(e.reason))
+        except httplib.HTTPException as e:
+            ret = None
+            print('HTTPException')
+        return ret
+    
+    def _download(self, filename):
+        try:
+            zip_file_obj = open(zip_file, 'w')
+            ret = self._http_download_file(self.DOWNLOAD_ZIP_URL, zip_file_obj)
+            zip_file_obj.close()
+        except IOError as e:
+            ret = False
+        return ret
+    
+    def _install(self, filename):
+        return self._unpack(filename)
+
+    @staticmethod
+    def _unpack_filter(directory, filenames):
+        ret = []
+        for f in yed_installer.CONFIG_DIRS:
+            if f in filenames:
+                ret.append(f)
+        for f in yed_installer.CONFIG_FILES:
+            if f in filenames:
+                ret.append(f)
+        return ret
+    
+    def _unpack(self, zip_file, version):
+        if not os.path.exists(self._appdir):
+            os.makedirs(self._appdir)
+        if not os.path.exists(self._appbindir):
+            os.makedirs(self._appbindir)
+
+        tmpdir = tempfile.mkdtemp()
+
+        try:
+            with ZipFile(zip_file, 'r', allowZip64=False) as myzip:
+                myzip.extractall(tmpdir)
+            ret = True
+        except BadZipfile as e:
+            ret = False
+            print(('zipfile failed ' + str(e)))
+        if ret:
+            version_dir = os.path.join(tmpdir, 'yed-%s' % version)
+            for f in os.listdir(version_dir):
+                src = os.path.join(version_dir, f)
+                (base, ext) = os.path.splitext(f)
+                if ext == '.jar':
+                    shutil.copy2(src, os.path.join(self._appdir, f))
+
+            icon_dir = ''
+            for (icon_res, icon_file, icon_subdir, icon_name) in yed_installer.ICON_FILES:
+                icon_src = os.path.join(version_dir, 'icons', icon_file)
+                (icon_file_base, icon_file_ext) = os.path.splitext(icon_file)
+                icon_dest = os.path.join(self._icon_dir, '%ix%i' % (icon_res, icon_res), icon_subdir, icon_name + icon_file_ext)
+                mkdirp(os.path.dirname(icon_dest))
+                shutil.copy(icon_src, icon_dest)
+
+            yed_sh_path = os.path.join(self._installer_dir, 'yed.sh')
+            yed_sh_path_final = os.path.join(self._appbindir, 'yed')
+            shutil.copy(yed_sh_path, yed_sh_path_final)
+            os.chmod(yed_sh_path_final, 0o755)
+        return ret
+
+    def main(self):
+        #=============================================================================================
+        # process command line
+        #=============================================================================================
+        parser = argparse.ArgumentParser(description='downloads the latest SmartGIT and installs it locally.')
+        parser.add_argument('-v', '--verbose', dest='verbose', action='store_true', help='enable verbose output of this script.')
+        parser.add_argument('action', choices=['info', 'update', 'remove', 'purge', 'download', 'install'], help='sepcify the action to execute')
+        parser.add_argument('-f', '--force', dest='force', action='store_true', help='force action and do not ask for confirmation.')
+        parser.add_argument('--source', dest='source', help='override the source url')
+        parser.add_argument('--dest', dest='dest', help='destination directory')
+
+        args = parser.parse_args()
+
+        self._verbose = args.verbose
+        self._force = args.force
+        self._set_root_dir(args.dest)
+
+        ret = 0
+        if args.action == 'info':
+            if not self._info():
+                ret = 1
+            else:
+                ret = 0
+        elif args.action == 'update':
+            if not self._update():
+                ret = 1
+            else:
+                ret = 0
+        elif args.action == 'purge':
+            if not self._remove(purge=True):
+                ret = 1
+            else:
+                ret = 0
+        elif args.action == 'remove':
+            if not self._remove(purge=False):
+                ret = 1
+            else:
+                ret = 0
+        elif args.action == 'download':
+            if not self._download(args.download):
+                ret = 1
+            else:
+                ret = 0
+        elif  args.action == 'install':
+            if not self._install(args.install):
+                ret = 1
+            else:
+                ret = 0
+
+        return ret
+
+if __name__ == "__main__":
+    app =  yed_installer()
+    sys.exit(app.main())

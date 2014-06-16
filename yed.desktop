@@ -1,0 +1,16 @@
+[Desktop Entry]
+Categories=Java;Graphics;
+Comment[en_US]=yEd Graph Editor
+Comment=yEd Graph Editor
+Exec=yed
+GenericName[en_US]=yEd
+GenericName=yEd
+Icon=yed
+MimeType=
+Name[en_US]=yEd
+Name=yEd
+Path=
+StartupNotify=true
+Terminal=false
+TerminalOptions=
+Type=Application

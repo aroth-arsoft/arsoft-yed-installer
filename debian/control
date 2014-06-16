@@ -1,0 +1,16 @@
+Source: arsoft-yed
+Section: admin
+Priority: optional
+Maintainer: Andreas Roth <aroth@arsoft-online.com>
+Standards-Version: 3.9.5
+Build-Depends: debhelper (>= 8), python (>= 2.7), arsoft-python
+XS-Python-Version: >=2.7
+
+Package: arsoft-yed
+Architecture: all
+Depends: ${misc:Depends}
+Description: yEd Graph Editor
+ yEd is a powerful desktop application that can be used to quickly and effectively
+ generate high-quality diagrams. Create diagrams manually, or import your external
+ data for analysis. Our automatic layout algorithms arrange even large data sets
+ with just the press of a button.
